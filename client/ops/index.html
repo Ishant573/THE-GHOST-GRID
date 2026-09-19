@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Ghost Grid — Operator Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/shared/design-system.css">
+  <link rel="stylesheet" href="/static/ops/style.css">
+</head>
+<body>
+  <div id="disconnected-banner" class="disconnected-banner">CONNECTION LOST — Reconnecting…</div>
+
+  <header id="status-bar">
+    <div class="brand">THE GHOST GRID / OPS</div>
+    <div class="status-metrics">
+      <span class="metric"><span class="label">Cycle</span> <span class="value" data-cycle>0</span></span>
+      <span class="metric"><span class="label">Nodes</span> <span class="value" data-nodes>0</span></span>
+      <span class="metric"><span class="label">Pkts/s</span> <span class="value" data-pps>0</span></span>
+      <span class="metric"><span class="label">Drift</span> <span class="value" data-drift>0ms</span></span>
+      <span class="metric"><span class="label">AI</span> <span class="value" data-ai-status>Off</span></span>
+    </div>
+    <div class="system-state">
+      <span class="status-dot" data-system-status></span>
+      <span class="system-label" data-system-label>READY</span>
+    </div>
+  </header>
+
+  <main id="dashboard">
+    <!-- LEFT: Scenario triggers + cycle control -->
+    <section id="controls" class="panel">
+      <h2>SCENARIO TRIGGERS</h2>
+
+      <div class="control-group">
+        <h3>Adversarial <span class="help-btn" data-help="adversarial">?</span></h3>
+        <button class="btn btn-danger" data-trigger="inject_jamming">
+          <span><i class="ico">⚡</i>Inject Jamming</span><span class="kbd">J</span>
+        </button>
+        <button class="btn btn-danger" data-trigger="drop_drone">
+          <span><i class="ico">▼</i>Drop Drone</span><span class="kbd">D</span>
+        </button>
+        <button class="btn btn-info" data-trigger="deploy_drone">
+          <span><i class="ico">▲</i>Deploy Drone</span>
+        </button>
+        <button class="btn btn-danger" data-trigger="trigger_honeypot">
+          <span><i class="ico">◎</i>Trigger Honeypot</span><span class="kbd">H</span>
+        </button>
+        <button class="btn btn-danger" data-trigger="destroy_node">
+          <span><i class="ico">✕</i>Destroy Node</span>
+        </button>
+      </div>
+
+      <div class="control-group">
+        <h3>Deception <span class="help-btn" data-help="deception">?</span></h3>
+        <button class="btn btn-warn" data-trigger="activate_decoys">
+          <span><i class="ico">◇</i>Activate Decoys</span><span class="kbd">A</span>
+        </button>
+        <button class="btn btn-warn" data-trigger="pattern_linear">
+          <span><i class="ico">→</i>Linear Wave</span>
+        </button>
+        <button class="btn btn-warn" data-trigger="pattern_convoy">
+          <span><i class="ico">⇢</i>Phantom Convoy</span>
+        </button>
+        <button class="btn btn-warn" data-trigger="pattern_radial">
+          <span><i class="ico">◌</i>Radial Expansion</span>
+        </button>
+        <button class="btn btn-warn" data-trigger="pattern_cluster">
+          <span><i class="ico">◎</i>Random Walk</span>
+        </button>
+      </div>
+
+      <div class="control-group">
+        <h3>AI / HQ <span class="help-btn" data-help="ai">?</span></h3>
+        <button class="btn btn-info" data-trigger="trigger_ai_adaptation">
+          <span><i class="ico">⟳</i>Force AI Adaptation</span>
+        </button>
+        <button class="btn btn-info" data-trigger="request_sitrep">
+          <span><i class="ico">📋</i>Request SITREP</span>
+        </button>
+        <div class="roe-control">
+          <label class="roe-label">ROE</label>
+          <select id="roe-select" class="roe-select">
+            <option value="PEACETIME">PEACETIME</option>
+            <option value="DEFENSIVE">DEFENSIVE</option>
+            <option value="ACTIVE" selected>ACTIVE</option>
+            <option value="EMERGENCY">EMERGENCY</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="control-group">
+        <h3>System <span class="help-btn" data-help="system">?</span></h3>
+        <button class="btn btn-neutral" data-trigger="pause_cycles">
+          <span><i class="ico">⏸</i>Pause Cycles</span><span class="kbd">␣</span>
+        </button>
+        <button class="btn btn-neutral" data-trigger="resume_cycles" disabled>
+          <span><i class="ico">▶</i>Resume</span><span class="kbd">␣</span>
+        </button>
+        <button class="btn btn-neutral" data-trigger="reset_state">
+          <span><i class="ico">↺</i>Reset State</span><span class="kbd">R</span>
+        </button>
+      </div>
+
+      <div class="control-group">
+        <h3>Demo Sequence <span class="help-btn" data-help="demo">?</span></h3>
+        <button class="btn btn-primary" data-trigger="run_full_pitch">
+          <span><i class="ico">▶▶</i>Run Full Pitch (5 min)</span>
+        </button>
+        <button class="btn btn-warn" data-trigger="pause_pitch" disabled>
+          <span><i class="ico">⏸</i>Pause Pitch</span>
+        </button>
+        <button class="btn btn-info" data-trigger="resume_pitch" disabled>
+          <span><i class="ico">▶</i>Continue Pitch</span>
+        </button>
+        <button class="btn btn-neutral" data-trigger="stop_pitch" disabled>
+          <span><i class="ico">■</i>Stop Pitch</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- CENTER: Minimap + event log -->
+    <section id="center-column">
+      <div id="minimap" class="panel">
+        <h2>LIVE MESH STATE</h2>
+        <canvas id="minimap-canvas"></canvas>
+      </div>
+
+      <div id="pulse-panel" style="padding:0;overflow:hidden;border-radius:6px;border:1px solid var(--border-default);">
+        <canvas id="pulse-canvas" style="width:100%;height:28px;display:block;"></canvas>
+      </div>
+
+      <div id="log-tabs" class="panel">
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="events">EVENT LOG <span class="help-btn" data-help="event_log">?</span></button>
+          <button class="tab-btn" data-tab="units">UNITS <span class="help-btn" data-help="units">?</span></button>
+          <button class="tab-btn" data-tab="sim">SIMULATION <span class="help-btn" data-help="simulation">?</span></button>
+          <button class="tab-btn" data-tab="routing">ROUTING <span class="help-btn" data-help="routing">?</span></button>
+        </div>
+        <div class="tab-content active" id="tab-events">
+          <div class="event-log-content"></div>
+        </div>
+        <div class="tab-content" id="tab-units">
+          <div class="units-content"></div>
+        </div>
+        <div class="tab-content" id="tab-sim">
+          <div class="sim-controls-content">
+            <div class="sim-toggle-row">
+              <label><input type="checkbox" id="sim-movement"> Movement (patrol drift)</label>
+            </div>
+            <div class="sim-toggle-row">
+              <label><input type="checkbox" id="sim-tx"> TX arcs (burst transmissions)</label>
+            </div>
+            <div class="sim-toggle-row">
+              <label><input type="checkbox" id="sim-jamming"> Ambient jamming</label>
+            </div>
+            <div class="sim-range-row">
+              <label>TX rate <span id="sim-tx-rate-val">15%</span></label>
+              <input type="range" id="sim-tx-rate" min="0" max="100" value="15">
+            </div>
+            <div class="sim-range-row">
+              <label>Move speed <span id="sim-speed-val">2</span></label>
+              <input type="range" id="sim-speed" min="0" max="10" value="2">
+            </div>
+            <div class="sim-range-row">
+              <label>Jamming interval <span id="sim-jam-val">40</span> cycles</label>
+              <input type="range" id="sim-jam-interval" min="5" max="100" value="40">
+            </div>
+            <div class="sim-info">
+              <span id="sim-count">0</span> virtual soldiers
+            </div>
+          </div>
+        </div>
+        <div class="tab-content" id="tab-routing">
+          <div id="routing-node-list" style="max-height:80px;overflow-y:auto;border-bottom:1px solid #333;padding:4px;font-size:10px;color:#888;">Loading nodes...</div>
+          <div id="routing-table-content" style="padding:4px;font-size:10px;font-family:'JetBrains Mono',monospace;color:#666;">Select a node above to inspect its routing table.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT: AI reasoning + adapters + cycle control -->
+    <section id="right-column">
+      <div id="ai-panel" class="panel">
+        <h2>AI REASONING <span class="help-btn" data-help="ai_reasoning">?</span></h2>
+        <div class="ai-content">
+          <div class="ai-no-data">No recent AI decisions</div>
+        </div>
+        <div class="ai-history">
+          <h3>Recent Decisions</h3>
+          <div class="ai-history-list"></div>
+        </div>
+      </div>
+
+      <div id="adapters-panel" class="panel">
+        <h2>ADAPTERS <span class="help-btn" data-help="adapters">?</span></h2>
+        <div class="adapter-row">
+          <span class="adapter-name">wlan1 (drone)</span>
+          <span class="adapter-status unknown" data-adapter="wlan1">—</span>
+        </div>
+        <div class="adapter-row">
+          <span class="adapter-name">wlan2 (ground 1)</span>
+          <span class="adapter-status unknown" data-adapter="wlan2">—</span>
+        </div>
+        <div class="adapter-row">
+          <span class="adapter-name">wlan3 (ground 2)</span>
+          <span class="adapter-status unknown" data-adapter="wlan3">—</span>
+        </div>
+        <div class="adapter-row">
+          <span class="adapter-name" data-adapter-label="cm">LLM Backend</span>
+          <span class="adapter-status unknown" data-adapter="cm">—</span>
+        </div>
+      </div>
+
+      <div id="cycle-control" class="panel">
+        <h2>CYCLE <span class="help-btn" data-help="cycle">?</span></h2>
+        <label>Period
+          <select data-cycle-period>
+            <option value="250">250ms (fast)</option>
+            <option value="500">500ms</option>
+            <option value="1000" selected>1000ms (normal)</option>
+            <option value="2000">2000ms</option>
+            <option value="5000">5000ms (slow)</option>
+          </select>
+        </label>
+        <div class="active-patterns">
+          <h3>Active Patterns</h3>
+          <ul class="patterns-list">
+            <li class="no-patterns">No active patterns</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  </main>
+
+
+  <!-- Help modal -->
+  <div id="help-modal" class="help-modal hidden">
+    <div class="help-modal-content">
+      <div class="help-modal-header">
+        <h3 id="help-modal-title"></h3>
+        <button class="help-modal-close">&times;</button>
+      </div>
+      <div id="help-modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/static/shared/connection.js"></script>
+  <script src="/static/shared/pulse.js"></script>
+  <script src="/static/ops/controls.js"></script>
+  <script src="/static/ops/script.js"></script>
+</body>
+</html>

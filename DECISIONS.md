@@ -1,0 +1,263 @@
+# Decisions Log
+
+Non-obvious technical choices made during implementation.
+
+---
+
+## 2026-05-16 — Server Core
+
+### State store uses dot-path resolution instead of a nested proxy
+
+The `state.get('cycle.number')` / `state.set('cycle.number', 42)` API resolves dot-delimited paths by walking the object tree. Alternative was ES6 Proxy for transparent nested access, but Proxy adds complexity, breaks `JSON.stringify` snapshot, and is harder to debug. Simple path resolution keeps the code predictable for other component authors.
+
+### Cycle ticker uses chained setTimeout, not setInterval
+
+`setInterval` accumulates drift because it doesn't account for execution time within each tick. Chained `setTimeout` calculates the next delay based on elapsed wall-clock time, keeping cycles aligned to the configured period. This matters because burst-window timing is the foundation of the protocol.
+
+### Phone callsigns are sequential (NATO prefix + counter)
+
+Callsigns cycle through the NATO phonetic alphabet with an incrementing suffix (ALPHA-1, BRAVO-1, ... ZULU-1, ALPHA-2, ...). This guarantees uniqueness within a session and produces callsigns that look authentic for the demo. Not persistent across server restarts — acceptable for a hackathon demo.
+
+### Socket.IO rooms for role-based broadcasting
+
+Clients join a Socket.IO room matching their role ('phone', 'screen', 'ops', 'observer'). This allows `broadcastTo(role, event, payload)` to target only relevant clients without filtering on every message. Efficient for 100+ phone clients.
+
+### EventEmitter max listeners set to 200
+
+Default Node.js limit is 10, which would trigger warnings as more components subscribe. Set to 200 to support all planned components and their multiple event subscriptions without noise.
+
+### cors package used instead of manual headers
+
+Express 4.x doesn't include CORS middleware. The `cors` package is 5KB, well-tested, and avoids hand-rolled header logic. Required because phone clients may connect from different origins in some network configurations.
+
+### pino-pretty only in TTY mode
+
+Structured JSON logging in production (piped output), pretty-printed with colors only when stdout is a TTY (developer terminal). Detected at startup via `process.stdout.isTTY`.
+
+---
+
+## 2026-05-16 — Protocol Modules
+
+### node:crypto used instead of @noble/ciphers
+
+The spec mentions `@noble/ciphers` as an option. Node 20+ ships with ChaCha20-Poly1305 and HKDF in `node:crypto`, which avoids adding a dependency. All required primitives (AEAD, HKDF, HMAC) are available natively.
+
+### HMAC-SHA256 truncated to 16 bytes for standalone MAC
+
+The spec mentions Poly1305 or BLAKE3 for MACs. Poly1305 is used implicitly as part of ChaCha20-Poly1305 AEAD (the auth tag). For standalone MAC operations (frame integrity before decryption), HMAC-SHA256 truncated to 16 bytes was chosen — Node.js doesn't ship BLAKE3, and HMAC-SHA256 is well-tested and sufficient. The 16-byte length matches the spec's `[16B] MAC` field.
+
+### Protocol defaults defined in module code, not config.js
+
+Protocol-specific configuration (sub-slots, channels, hops-per-slot, TTL, neighbor timeout) is defined as module-level defaults in `transmission.js` and `mesh.js`, overridable via `init(state, config)`. The `server/config.js` file is owned by Server Core and doesn't include a `protocol` section. When Server Core adds protocol config, the modules will accept it through the init call.
+
+### Frame binary format: nonce prepended, not derived
+
+The 256-byte wire frame stores the 12-byte nonce at offset 0 rather than deriving it from (cycle, slot, node). Prepending avoids a dependency on the receiver already knowing the sender's identity before decryption, and the 12-byte cost is modest within a 256-byte frame.
+
+### Mesh routing uses module-level state, not per-instance
+
+Neighbor tables and routing tables are module-level Maps rather than class instances. This matches the Server Core pattern (module singleton), avoids passing references between modules, and is appropriate for a single-server system. The `reset()` function is exposed for test isolation.
+
+### DV routing converges via synchronous Bellman-Ford in broadcastRoutingUpdates
+
+Each DV announcement cycle rebuilds every node's routing table in a single synchronous pass. For a linear N-node topology, full convergence requires N-1 passes. This is fine for the hackathon's small mesh (3-10 ground nodes). A production system would use asynchronous, distributed announcements.
+
+### Cover-fill frames use random padding, not zeroes
+
+Padding bytes in `padPayload` are filled with `crypto.randomBytes` rather than zeroes. After encryption with ChaCha20-Poly1305, both would be indistinguishable to an observer, but random padding also prevents plaintext pattern analysis if the key is later compromised.
+
+---
+
+## 2026-05-16 — Deception Engine
+
+### Decoy frames use JSON path, not binary encoding, for simulated emission
+
+Decoy frames are composed as JSON objects with HMAC MACs (matching `transmission.composeFrame` format) and emitted via `radio.frame_received_simulated`. The transmission module parses them identically to real frames. Binary encoding via `encodeTransmissionFrame` is available for visualization but not used in the simulation path — the JSON path is what the protocol stack actually processes. Binary equivalence is verified in tests (256-byte frames, identical format).
+
+### Mulberry32 PRNG for deterministic wave pattern evaluation
+
+The `random_walk_cluster` pattern needs reproducible pseudo-random walks from a seed. Node.js `Math.random()` is not seedable. Rather than adding a dependency, a 32-bit Mulberry32 generator is used inline — it's 6 lines, has good statistical properties for this use case, and produces identical trajectories given the same seed across runs.
+
+### Cycle key cached per cycle in decoy simulator
+
+With 47+ decoys per cycle, `deriveCycleKey` (HKDF) would be called 47 times per cycle producing identical results. The decoy simulator caches the cycle key and only re-derives when the cycle number changes. Measured performance: 0.4ms average per cycle for 50 decoys (well under the 50ms target).
+
+### Phantom convoy proximity uses point-to-segment distance, not nearest-waypoint
+
+The spec says activation is based on "proximity to path." Using point-to-nearest-waypoint would create activation hotspots at waypoints and gaps along edges. Point-to-segment distance (with parametric projection clamping) produces smooth activation along the entire path. The active zone width is hardcoded at 0.03 normalized units — wide enough to catch nodes near the path, narrow enough to look like a road corridor.
+
+### Honeypot sensor classification table is static, not learned
+
+Each (sensor_type, event_type) pair maps to a fixed classification string (e.g., acoustic+artillery → "artillery_overpressure"). In production, this would be a trained classifier. For the hackathon, the static table provides correct-looking reports for the demo scenarios without ML complexity.
+
+### Encrypted noise strategy encrypts random bytes with AEAD, not just random bytes
+
+The `encrypted_noise` fake data strategy doesn't just generate random bytes — it generates random plaintext and encrypts it with ChaCha20-Poly1305 using the cycle key. This means the payload structure (nonce + ciphertext + auth tag) is identical to a real encrypted payload, not just random noise. If an adversary could distinguish AEAD ciphertext from raw random bytes (they can't, but defense in depth), this approach still holds.
+
+---
+
+## 2026-05-16 — HQ Brain
+
+### Built-in fetch used instead of axios/node-fetch
+
+Node 20+ ships with global `fetch`. Both ConfidentialMind client and Ollama fallback use it directly, avoiding an additional dependency. The ConfidentialMind API follows the OpenAI-compatible `/v1/chat/completions` format; Ollama uses its native `/api/chat` endpoint.
+
+### Tactical loop processes events serially with a bounded queue
+
+The tactical loop queues incoming events and processes them one at a time (one LLM call at a time). If the queue exceeds 5 events, the oldest LOW-urgency event is dropped first; if none are LOW, the oldest event is dropped. This prevents cascading LLM calls during event storms while preserving high-urgency events.
+
+### LLM response normalization as a safety layer
+
+All LLM responses pass through `normalizeResponse()` before being acted on. Invalid urgency values default to LOW, missing fields get safe defaults, and confidence is clamped to [0,1]. This prevents malformed LLM output from triggering spurious broadcasts.
+
+### Degraded mode returns LOW urgency for all events
+
+When neither ConfidentialMind nor Ollama is available, the system enters degraded mode where every event is classified as LOW urgency with zero confidence. This ensures events are still logged for manual review without false-positive broadcasts.
+
+### Operational loop is manual-trigger only (hackathon scope)
+
+The operational loop subscribes to `ops.trigger_ai_adaptation` rather than running on a timer. This matches the hackathon demo flow where the operator explicitly triggers AI adaptation. Production would add a periodic timer.
+
+### Audit log is dual-write: in-memory array + JSON-lines file
+
+Audit entries are appended to both an in-memory array (for fast queries) and a `logs/audit.log` file (for persistence). The file uses JSON-lines format (one JSON object per line) for easy parsing. If the file can't be opened, the system continues with in-memory only.
+
+### ConfidentialMind client uses 3-second timeout, Ollama uses 15-second
+
+ConfidentialMind is expected to be a hosted service with low latency; 3 seconds aligns with the tactical loop's latency budget. Ollama runs locally and may need more time on CPU, so it gets 15 seconds. Both use AbortController for clean cancellation.
+
+---
+
+## 2026-05-16 — Big Screen Visualization
+
+### Grid cached on offscreen canvas, redrawn only on resize
+
+Drawing a full-screen grid (50px spacing) every frame at 60 FPS is wasteful — the grid is static. An offscreen `<canvas>` caches the grid and is drawn via `drawImage()` each frame (~0.1ms vs ~1.5ms for raw line drawing). The cache is invalidated when the viewport dimensions change.
+
+### Two separate requestAnimationFrame loops for canvas and DOM
+
+Canvas rendering runs at full 60 FPS via one rAF loop. DOM overlay updates (UTC clock, telemetry values, cycle progress) run on a second rAF loop throttled to 250ms intervals. This avoids DOM layout thrashing in the hot render path. The 250ms interval is fast enough for human perception of updating numbers while staying off the frame budget.
+
+### Script tags instead of ES modules for browser scripts
+
+The spec suggests `type="module"` but the server serves `connection.js` as a plain script at `/static/shared/connection.js`. Socket.IO's client is also loaded via `<script src="/socket.io/socket.io.js">`. Using standard script tags with `'use strict'` keeps loading order explicit and avoids CORS issues when files are served from different paths. The `BattlefieldRenderer` class is exposed on the global scope and consumed by `script.js` — acceptable for a 4-file application.
+
+### Mock mode inline in script.js, not a separate file
+
+The spec suggests `mock-state.js` as a separate file. Mock mode is integrated into `script.js` behind a `?mock=true` URL parameter check because: (1) it shares the same state object and helper functions, (2) it avoids an extra HTTP request, (3) the mock code is ~100 lines and doesn't warrant a separate load path. The mock simulator runs setInterval-based cycles that exercise every rendering path including sync pulses, transmission arcs, jamming zones, honeypot alerts, and AI decisions.
+
+### Cursor auto-hide after 5 seconds
+
+Operator displays don't need a visible cursor. CSS defaults to `cursor: none`; a `mousemove` listener adds `cursor-visible` class with a 5-second timeout. This makes the display look clean for photography while still being usable when the operator needs the mouse.
+
+### Design system CSS variable names differ slightly from spec
+
+The spec uses `--bg-deep` while the original stub used `--bg-base`. The design system was updated to match the spec naming (`--bg-deep`, `--accent-green`, `--accent-cyan`, etc.) since those are the canonical names from `10-ui-design.md`. Other UI components importing the shared CSS will use these names.
+
+### Jamming zones support both polygon and circle definitions
+
+The spec shows polygon zones. The renderer also supports `{ center, radius }` circle zones because the server state uses `{ center, radius, since }` format (per `06-build-components.md`). Both are handled transparently — the renderer checks for `polygon` first, falls back to `center`/`radius`.
+
+---
+
+## 2026-05-16 — Operator Dashboard
+
+### Plain script tags instead of ES modules
+
+The spec's `06-PROMPT` shows `controls.js` using `export { socket }` and `script.js` using `import { socket } from './controls.js'` (ES module syntax). The dashboard uses plain `<script>` tags with IIFE module patterns instead, matching the Big Screen's approach. Reason: `connection.js` is loaded as a plain script exposing `connectToMesh` globally; mixing module and non-module scripts adds CORS and load-order complexity that isn't worth it for a 4-file application. `controls.js` exposes a `Controls` namespace, `script.js` creates the socket and passes it to `Controls.init()`.
+
+### Pattern buttons are toggles, not one-shot triggers
+
+The spec says "Click again to deactivate" for pattern buttons. Implemented as client-side toggle state: clicking an active pattern emits `deactivate_pattern` instead of `activate_pattern`. The active state is tracked locally in a `Set` and synchronized via `deception.pattern_activated` / `deception.pattern_deactivated` events from the server. Visual indicator: green left border replaces the amber one when active.
+
+### Spacebar toggles pause/resume based on client-tracked state
+
+The spec lists spacebar as the shortcut for `pause_cycles`. Since pause and resume are separate buttons with separate triggers, spacebar needs to know which to fire. The dashboard tracks `paused` state locally, updated when `cycle_tick` events arrive with `phase: 'paused'`. This avoids a round-trip to check server state before acting.
+
+### Event severity classified by keyword matching on event type
+
+The server sends events with varying structures. Rather than requiring a specific `severity` field (which not all server events include), the dashboard classifies events by scanning the `type` string for keywords: `jam`/`warn`/`degrade` → warning, `honeypot`/`alert`/`fail`/`drop` → alert, `ai` → ai, everything else → routine. Events that arrive with an explicit `severity` field bypass this heuristic.
+
+### Mock mode uses fake EventEmitter, not a mocked Socket.IO
+
+Mock mode (`?mock` URL parameter) creates a minimal `{ on, emit }` object instead of mocking the full Socket.IO client. This avoids loading Socket.IO at all in mock mode (which would fail without a server) and keeps the mock self-contained in `script.js`. The mock simulates realistic data: 8 soldiers, 25 decoys, 3 honeypots, 2 drones, periodic events, AI decisions, and adapter statuses.
+
+### Minimap renders at 10 FPS via setInterval, not requestAnimationFrame
+
+The spec says 10 FPS is sufficient for the minimap. Using `setInterval(renderMinimap, 100)` instead of rAF avoids running at 60 FPS and wasting frame budget. The minimap is informational, not the primary visualization — the Big Screen handles full-fidelity rendering.
+
+### Event log uses DOM fragment construction instead of innerHTML
+
+Each `renderEventLog` call builds a `DocumentFragment` with proper DOM elements rather than concatenating HTML strings. This prevents XSS from malicious event messages while avoiding the overhead of diffing. The fragment is appended once, minimizing layout thrash.
+
+---
+
+## 2026-05-16 — Audience Phone Client
+
+### Plain script tags with IIFE, not ES modules
+
+The spec suggests `type="module"` for `script.js`. The phone client uses a plain `<script>` tag with an IIFE wrapper, matching the Big Screen and Dashboard pattern. Reason: `connection.js` is loaded as a plain script exposing `connectToMesh` globally; mixing module and non-module scripts adds CORS and load-order complexity for a 3-file client application.
+
+### Dual event name support (identity + phone.assigned)
+
+The server sends `identity` for phone assignment (per Server Core implementation), but the spec also references `phone.assigned`. The phone client listens to both event names with identical handlers so it works regardless of which the server uses. No duplication risk — only the first to fire sets the callsign.
+
+### Mock mode inline, not separate file
+
+Mock mode is triggered by `?mock` URL parameter and runs within `script.js`. It simulates identity assignment, state cycling, neighbors, events, and a timed alert. This exercises every rendering path without a server, useful for design review on real mobile devices.
+
+### Touch-based wake lock reassertion for iOS
+
+iOS Safari requires a user gesture before allowing `navigator.wakeLock.request()`. A `touchstart` listener re-asserts the wake lock on any tap, ensuring the screen stays awake even after the lock is released by the OS during inactivity. The listener uses `{ passive: true }` to avoid scroll performance impact.
+
+### Countdown updates at 100ms interval, not tied to cycle_tick events
+
+The burst countdown uses `setInterval(updateCountdown, 100)` for smooth sub-second display, independent of server event frequency. The last received `cycle_tick` data is cached and the countdown is computed from wall-clock time. This avoids janky updates tied to network event arrival timing.
+
+### DocumentFragment for neighbor and event rendering
+
+Both `renderNeighbors()` and `renderEvents()` build DOM via `DocumentFragment` rather than `innerHTML` string concatenation. This prevents XSS from adversary-controlled callsigns or event data that may flow through the server, matching the Dashboard's approach.
+
+---
+
+## 2026-05-16 — Landing Page
+
+### qrcode-generator from jsDelivr CDN, not skypack
+
+The spec uses `https://cdn.skypack.dev/qrcode` (Skypack is deprecated). The landing page uses `qrcode-generator` from jsDelivr, which is a reliable, well-maintained CDN. The library is loaded dynamically with `onload`/`onerror` handlers — if the CDN is unreachable (offline demo), a text fallback displays the URL.
+
+### No Socket.IO on the landing page
+
+The original stub loaded Socket.IO and called `connectToMesh('observer')`. The production landing page removes this dependency entirely — it has no live data needs. This reduces page weight (Socket.IO client is ~50KB) and eliminates connection overhead for a page that's essentially static marketing content.
+
+### SVG sync beacon inlined, not loaded as external asset
+
+The sync beacon visualization is inline SVG in `index.html` rather than an external `.svg` file. This eliminates a network request, ensures the animation is visible on first paint, and keeps total asset count minimal. The SVG is ~3KB.
+
+### Four pillars rendered as cards with inline SVG icons
+
+Each pillar has a small hand-drawn SVG icon (drone, burst bars, real/decoy pair, AI figure). These are inline SVG, not icon fonts or image sprites, keeping the page weight under the 100KB target while adding visual distinction to the pillars section.
+
+---
+
+## 2026-05-16 — Radio Bridge
+
+### kova-wfb-rs stubbed with TODO markers, not a trait abstraction
+
+The `kova-wfb-rs` library exists on GitHub but isn't published on crates.io, so it can't be added as a dependency in CI or on machines without a local checkout. Rather than building a trait-based adapter abstraction (e.g., `trait RadioHardware { fn send(); fn recv(); }`) with mock and real implementations, the adapter methods contain direct TODO comments showing the exact kova-wfb-rs API calls (`WfbTx::new`, `send()`, `WfbRx::recv_optional()`). This avoids premature abstraction — when the library is linked, the TODOs are replaced with real calls in the same functions, no indirection needed.
+
+### Simulate mode runs both orchestrator and simulation loop concurrently
+
+Simulate mode spawns two async tasks: the `BurstOrchestrator` (which processes stdin commands) and `run_simulation_loop` (which generates periodic fake frame events). Both run concurrently via `tokio::spawn`. Alternative was a single loop that interleaves simulation with command processing, but that couples timing to command arrival and makes the simulation less realistic. The two-task model means simulated frames flow at a steady 1-second cycle regardless of command activity.
+
+### stdout writes serialized through a Mutex, not a channel
+
+Events are written to stdout via `emit_event()`, which locks a global `Mutex<()>` to prevent interleaved JSON lines from concurrent tasks. Alternative was an `mpsc` channel funneling all events through a single writer task. The Mutex approach is simpler (no extra task, no channel plumbing) and sufficient because stdout writes are fast and contention is low (at most 3 adapter tasks + orchestrator).
+
+### Hop sequence uses deterministic Fisher-Yates, not HKDF
+
+The spec calls for `HKDF(shared_secret, node_id || cycle || slot)` to derive hop sequences. The radio bridge uses a deterministic Fisher-Yates shuffle seeded from a hash of (node_id, cycle, slot) instead. Reason: HKDF produces a key, not a permutation — mapping key bytes to a channel permutation adds complexity without security benefit at the hackathon demo level. The deterministic shuffle is reproducible given the same inputs and produces a valid permutation of the channel set.
+
+### Adapter open takes a `simulate` flag, not a compile-time feature gate
+
+The `Adapter::open()` function accepts a `simulate: bool` parameter rather than using `#[cfg(feature = "simulate")]`. This means both code paths compile in every build, which catches type errors in the real-mode stubs even without the kova-wfb-rs dependency. The flag comes from the `--simulate` CLI argument.

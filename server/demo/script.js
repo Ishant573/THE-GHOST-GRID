@@ -1,0 +1,177 @@
+'use strict';
+
+const log = require('../log').child({ component: 'demo' });
+const { dispatch } = require('./scenarios');
+
+let _state = null;
+let _steps = [];
+let _activeTimers = [];
+let _running = false;
+let _paused = false;
+let _startedAt = 0;
+let _pausedAt = 0;
+let _pausedElapsed = 0;
+
+function init(state) {
+  _state = state;
+
+  state.on('ops.trigger_scenario', (data) => {
+    if (data.scenario === 'run_full_pitch') start();
+    if (data.scenario === 'stop_pitch') stop();
+    if (data.scenario === 'pause_pitch') pause();
+    if (data.scenario === 'resume_pitch') resume();
+  });
+}
+
+function buildSteps() {
+  return [
+    // Minute 0: Sync beacon (3s pause after countdown)
+    { t: 0,   fn: () => { dispatch('resume_cycles', {}); }},
+    { t: 3,   fn: () => { broadcastStep('Sync beacon active. Fiber-tethered drones provide time discipline.'); }},
+    { t: 11,  fn: () => { broadcastStep('GPS jammed? Doesn\'t matter. The drone on fiber holds time discipline no jammer can reach.'); }},
+    { t: 18,  fn: () => { broadcastStep('Position data flows to HQ inside the sync window. Every node, every cycle, anchored to the drone.'); }},
+    { t: 25,  fn: () => { dispatch('request_sitrep', {}); broadcastStep('Initial SITREP. All units report position to HQ via drone mesh relay.'); }},
+
+    // Minute 1: Troops moving + burst protocol
+    { t: 35,  fn: () => { popSettings({ movementEnabled: true, movementSpeed: 0.003 }); broadcastStep('Squads deploying. Watch them move across the operational area.'); }},
+    { t: 45,  fn: () => { broadcastStep('Sub-50ms burst windows. Soldiers emit only when they have data, then go silent.'); }},
+    { t: 55,  fn: () => { dispatch('request_sitrep', {}); broadcastStep('HQ requests SITREP. Positions updated hop-by-hop through the mesh.'); }},
+
+    // Minute 2: Resilience under attack
+    { t: 70,  fn: () => { dispatch('inject_jamming', { area: { center: { x: 0.55, y: 0.45 }, radius: 0.15 } }); broadcastStep('EW ATTACK. Enemy jams sector 3.'); }},
+    { t: 80,  fn: () => { broadcastStep('Mesh routing reconverges around the dead zone. No GPS in this chain.'); }},
+    { t: 85,  fn: () => { dispatch('clear_jamming', {}); broadcastStep('Jamming cleared. Mesh self-healed.'); }},
+    { t: 100, fn: () => { dispatch('drop_drone', { droneId: 'DRONE-2' }); broadcastStep('DRONE-2 lost. Remaining drones continue providing sync.'); }},
+    { t: 110, fn: () => { dispatch('request_sitrep', {}); broadcastStep('SITREP after attack. HQ confirms all units still reporting.'); }},
+
+    // Minute 3: Deception capability
+    { t: 120, fn: () => { dispatch('activate_decoys', { count: 47 }); broadcastStep('47 decoy emitters deployed. EUR 25 each, protocol-identical to real soldiers.'); }},
+    { t: 130, fn: () => { popSettings({ txEnabled: true, txRate: 0.1 }); broadcastStep('Decoys and soldiers transmitting. Enemy SIGINT sees uniform traffic, can\'t distinguish.'); }},
+    { t: 140, fn: () => { dispatch('activate_pattern', { patternName: 'linear_translation', parameters: { velocity: 0.02, direction: 0, bandWidth: 0.15 } }); broadcastStep('Wave choreography. Enemy sees a battalion moving east.'); }},
+    { t: 155, fn: () => { dispatch('activate_pattern', { patternName: 'phantom_convoy', parameters: { velocity: 0.025, convoyLength: 0.3, path: [{ x: 0.2, y: 0.7 }, { x: 0.5, y: 0.5 }, { x: 0.8, y: 0.3 }] } }); broadcastStep('Phantom convoy. Second deception axis, same protocol.'); }},
+
+    // Minute 4: Honeypot + AI (narrative climax)
+    { t: 175, fn: () => { dispatch('trigger_honeypot', { eventType: 'artillery' }); broadcastStep('HONEYPOT. Acoustic sensor detects artillery overpressure.'); }},
+    { t: 182, fn: () => { broadcastStep('Alert reaches every unit in 5 seconds. Sensor to warning, through the mesh, without HQ intervention.'); }},
+    { t: 190, fn: () => { broadcastStep('Friendly forces in the impact area have 25-85 seconds to take cover. Time of flight at typical artillery range.'); }},
+    { t: 200, fn: () => { dispatch('trigger_ai_adaptation', {}); broadcastStep('AI on ConfidentialMind analyzes enemy reaction. Updates choreography.'); }},
+
+    // Minute 5: Recovery + final proof
+    { t: 215, fn: () => { _state.set('drones.DRONE-2', { position: { x: 0.65, y: 0.12 }, status: 'active', role: 'sync' }); broadcastStep('DRONE-2 restored. Full sync redundancy.'); }},
+    { t: 225, fn: () => { broadcastStep('Watch the gap between real positions and HQ-known rings. That\'s fog of war, updated only by soldier reports.'); }},
+    { t: 240, fn: () => { dispatch('request_sitrep', {}); broadcastStep('Final SITREP. Rings snap to soldiers, HQ picture complete.'); }},
+    { t: 255, fn: () => { popSettings({ movementEnabled: false, txEnabled: false }); broadcastStep('Architecture proven. Sync beacon anchors everything.'); }},
+
+    // Closing sequence: wordmark → tagline → cadence
+    { t: 270, fn: () => { dispatch('reset_state', {}); dispatch('resume_cycles', {}); broadcastScreen('wordmark', 'THE GHOST GRID'); }},
+    { t: 285, fn: () => { broadcastScreen('tagline', 'Everything they see is a lie.'); }},
+    { t: 300, fn: () => { broadcastStep('Sync on fiber. Beyond jamming. Beyond reach. The rest of the system runs because of that single fact.'); broadcastScreen('closing', ''); _running = false; log.info('===== FULL PITCH SEQUENCE COMPLETE ====='); }},
+  ];
+}
+
+function start() {
+  if (_running) {
+    log.warn('pitch already running');
+    return;
+  }
+  _running = true;
+  _paused = false;
+  _pausedElapsed = 0;
+  _startedAt = Date.now();
+  _steps = buildSteps();
+  log.info('===== FULL PITCH SEQUENCE STARTED =====');
+  _state.broadcast('pitch_state', { running: true, paused: false });
+  scheduleRemaining();
+}
+
+function stop() {
+  if (!_running) return;
+  clearAllTimers();
+  _running = false;
+  _paused = false;
+  _steps = [];
+  _state.broadcast('pitch_state', { running: false, paused: false });
+  broadcastStep('Pitch sequence stopped');
+  log.info('pitch sequence stopped');
+}
+
+function pause() {
+  if (!_running || _paused) return;
+  _paused = true;
+  _pausedAt = Date.now();
+  clearAllTimers();
+  _state.broadcast('pitch_state', { running: true, paused: true });
+  broadcastStep('Pitch PAUSED. Press resume to continue.');
+  log.info('pitch paused');
+}
+
+function resume() {
+  if (!_running || !_paused) return;
+  _pausedElapsed += Date.now() - _pausedAt;
+  _paused = false;
+  _state.broadcast('pitch_state', { running: true, paused: false });
+  broadcastStep('Pitch RESUMED');
+  log.info('pitch resumed');
+  scheduleRemaining();
+}
+
+function scheduleRemaining() {
+  clearAllTimers();
+  const elapsed = (Date.now() - _startedAt - _pausedElapsed) / 1000;
+
+  for (const step of _steps) {
+    if (step.done) continue;
+    const delay = (step.t - elapsed) * 1000;
+    if (delay <= 0) {
+      // Step should have already fired — run immediately
+      runStep(step);
+    } else {
+      _activeTimers.push(setTimeout(() => {
+        if (!_running || _paused) return;
+        runStep(step);
+      }, delay));
+    }
+  }
+}
+
+function runStep(step) {
+  if (step.done) return;
+  step.done = true;
+  try {
+    step.fn();
+  } catch (err) {
+    log.error({ err: err.message, at: step.t }, 'pitch step failed');
+  }
+}
+
+function clearAllTimers() {
+  for (const t of _activeTimers) clearTimeout(t);
+  _activeTimers = [];
+}
+
+function popSettings(settings) {
+  _state.emit('population.settings', settings);
+}
+
+function broadcastScreen(type, text) {
+  if (_state) {
+    _state.broadcastTo('screen', 'pitch_visual', { type, text });
+  }
+}
+
+function broadcastStep(message) {
+  if (_state) {
+    _state.broadcastTo('ops', 'event', {
+      type: 'demo',
+      ts: Date.now(),
+      message: '[PITCH] ' + message,
+    });
+    _state.broadcastTo('screen', 'demo_step', {
+      ts: Date.now(),
+      message: message,
+    });
+  }
+  log.info({ message }, 'pitch step');
+}
+
+module.exports = { init, start, stop, pause, resume };
